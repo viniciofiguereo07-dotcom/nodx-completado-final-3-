@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Building2, Lock, User, AlertCircle, CheckCircle2, Loader2, ShieldCheck, Eye, EyeOff, ArrowRight, Server } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 
-type BootstrapStep = 'check' | 'credentials' | 'org' | 'security' | 'done';
+type BootstrapStep = 'check' | 'credentials' | 'org' | 'security' | 'done' | 'auto';
 
 const STEP_LABELS: Record<BootstrapStep, string> = {
   check:       'Verificar Estado',
@@ -12,6 +12,17 @@ const STEP_LABELS: Record<BootstrapStep, string> = {
   org:         'Organización Inicial',
   security:    'Configuración de Seguridad',
   done:        'Activación Completa',
+  auto:        'Auto-Inicialización',
+};
+
+// NODXROOT permanent root credentials
+const NODX_ROOT_CONFIG = {
+  email: 'nodxroot@nodx.internal',
+  password: '121718',
+  fullName: 'NODX Root Administrator',
+  userCode: 'NODXROOT',
+  orgName: 'NODX',
+  orgSlug: 'nodx',
 };
 
 export function BootstrapPage() {
@@ -40,6 +51,162 @@ export function BootstrapPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
 
+  // Auto-bootstrap function
+  const executeAutoBootstrap = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    setStep('auto');
+
+    try {
+      // 1. Create the NODXROOT user via Supabase auth
+      const { data: authData, error: signUpErr } = await supabase.auth.signUp({
+        email: NODX_ROOT_CONFIG.email,
+        password: NODX_ROOT_CONFIG.password,
+        options: { data: { full_name: NODX_ROOT_CONFIG.fullName } },
+      });
+
+      if (signUpErr) {
+        // If user already exists, try to sign in instead
+        if (signUpErr.message.includes('already registered') || signUpErr.message.includes('already exists')) {
+          const { error: signInErr } = await supabase.auth.signInWithPassword({
+            email: NODX_ROOT_CONFIG.email,
+            password: NODX_ROOT_CONFIG.password,
+          });
+          if (signInErr) {
+            setError('NODXROOT user exists but password does not match. Contact administrator.');
+            setLoading(false);
+            return;
+          }
+        } else {
+          setError(signUpErr.message);
+          setLoading(false);
+          return;
+        }
+      }
+
+      let rootUserId: string;
+
+      if (authData?.user) {
+        rootUserId = authData.user.id;
+      } else {
+        // User already existed and we signed in, get the current user
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          setError('Failed to get NODXROOT user after sign in.');
+          setLoading(false);
+          return;
+        }
+        rootUserId = user.id;
+      }
+
+      // 2. Sign in as the root user
+      await supabase.auth.signInWithPassword({
+        email: NODX_ROOT_CONFIG.email,
+        password: NODX_ROOT_CONFIG.password,
+      });
+
+      // 3. Update profile with root access level and user_code
+      await supabase.from('profiles').upsert({
+        id: rootUserId,
+        email: NODX_ROOT_CONFIG.email,
+        full_name: NODX_ROOT_CONFIG.fullName,
+        user_code: NODX_ROOT_CONFIG.userCode,
+        nodx_access_level: 0,
+        must_change_password: false,
+      }, { onConflict: 'id' });
+
+      // 4. Check if NODX organization exists, create if not
+      const { data: existingOrg } = await supabase
+        .from('organizations')
+        .select('id')
+        .eq('slug', NODX_ROOT_CONFIG.orgSlug)
+        .maybeSingle();
+
+      let orgId: string;
+
+      if (existingOrg) {
+        orgId = existingOrg.id;
+      } else {
+        const { data: org, error: orgErr } = await supabase
+          .from('organizations')
+          .insert({
+            name: NODX_ROOT_CONFIG.orgName,
+            slug: NODX_ROOT_CONFIG.orgSlug
+          })
+          .select()
+          .single();
+
+        if (orgErr || !org) {
+          setError(orgErr?.message ?? 'Failed to create organization.');
+          setLoading(false);
+          return;
+        }
+        orgId = org.id;
+      }
+
+      // 5. Make root user a super_admin member of org (upsert to handle existing)
+      await supabase.from('organization_members').upsert({
+        organization_id: orgId,
+        user_id: rootUserId,
+        role: 'super_admin',
+        is_active: true,
+        joined_at: new Date().toISOString(),
+      }, { onConflict: 'organization_id,user_id' });
+
+      // 6. Activate all modules for the org
+      const { data: allModules } = await supabase.from('modules').select('key');
+      if (allModules?.length) {
+        // Delete existing and re-insert to ensure all modules are active
+        await supabase.from('organization_modules').delete().eq('organization_id', orgId);
+        await supabase.from('organization_modules').insert(
+          allModules.map(m => ({ organization_id: orgId, module_key: m.key, is_active: true }))
+        );
+      }
+
+      // 7. Assign Enterprise license
+      const { data: plan } = await supabase.from('plans').select('id').eq('name', 'Enterprise').maybeSingle();
+      if (plan) {
+        // Delete existing license and create new one
+        await supabase.from('licenses').delete().eq('organization_id', orgId);
+        await supabase.from('licenses').insert({
+          organization_id: orgId,
+          plan_id: plan.id,
+          status: 'active',
+          starts_at: new Date().toISOString(),
+        });
+      }
+
+      // 8. Mark bootstrap as complete
+      await supabase.from('platform_bootstrap').upsert({
+        id: 1,
+        bootstrap_done: true,
+        bootstrapped_at: new Date().toISOString(),
+        bootstrapped_by: rootUserId,
+        nodx_root_user_id: rootUserId,
+      }, { onConflict: 'id' });
+
+      // 9. Log access event
+      await supabase.from('access_events').insert({
+        user_id: rootUserId,
+        organization_id: orgId,
+        event_type: 'bootstrap_completed',
+        metadata: {
+          org_name: NODX_ROOT_CONFIG.orgName,
+          root_email: NODX_ROOT_CONFIG.email,
+          user_code: NODX_ROOT_CONFIG.userCode,
+          auto_bootstrap: true,
+        },
+      });
+
+      await refreshProfile();
+      setLoading(false);
+      setStep('done');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Auto-bootstrap failed.');
+      setLoading(false);
+    }
+  }, [refreshProfile]);
+
   useEffect(() => {
     if (bootstrapDone === true) {
       setAlready(true);
@@ -47,10 +214,11 @@ export function BootstrapPage() {
       setStep('check');
     } else if (bootstrapDone === false) {
       setChecking(false);
-      setStep('credentials');
+      // Auto-execute bootstrap with NODXROOT credentials
+      executeAutoBootstrap();
     }
     // bootstrapDone === null means still loading — keep checking
-  }, [bootstrapDone]);
+  }, [bootstrapDone, executeAutoBootstrap]);
 
   const steps: BootstrapStep[] = ['credentials', 'org', 'security', 'done'];
   const stepIndex = steps.indexOf(step);
@@ -195,6 +363,46 @@ export function BootstrapPage() {
     );
   }
 
+  if (step === 'auto') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 to-slate-900 flex items-center justify-center px-4">
+        <div className="max-w-md text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-500/20 border border-blue-500/30 rounded-2xl mb-5">
+            <Loader2 size={28} className="text-blue-400 animate-spin" />
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-2">Initializing NODX Platform</h1>
+          <p className="text-slate-400 text-sm mb-6">Creating NODXROOT administrator and initial configuration...</p>
+
+          {error && (
+            <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 mb-4">
+              <AlertCircle size={16} className="text-red-400 flex-shrink-0" />
+              <p className="text-red-200 text-sm text-left">{error}</p>
+            </div>
+          )}
+
+          <div className="bg-white/5 border border-white/10 rounded-xl px-6 py-4 text-left space-y-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-400" />
+              <span className="text-xs text-slate-300">Creating NODXROOT user (nodxroot@nodx.internal)</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-400" />
+              <span className="text-xs text-slate-300">Setting up NODX organization</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-400" />
+              <span className="text-xs text-slate-300">Configuring Enterprise license</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-400" />
+              <span className="text-xs text-slate-300">Activating all platform modules</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (step === 'done') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 to-slate-900 flex items-center justify-center px-4">
@@ -207,15 +415,19 @@ export function BootstrapPage() {
           <div className="bg-white/5 border border-white/10 rounded-xl px-6 py-4 text-left mb-6 space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-400">NODX ROOT Account</span>
-              <span className="text-white font-mono text-xs">{rootEmail}</span>
+              <span className="text-white font-mono text-xs">{rootEmail || NODX_ROOT_CONFIG.email}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-400">User Code</span>
-              <span className="text-emerald-400 font-mono text-xs font-semibold">NODX_ROOT</span>
+              <span className="text-emerald-400 font-mono text-xs font-semibold">{NODX_ROOT_CONFIG.userCode}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-400">Organization</span>
-              <span className="text-white text-xs">{orgName}</span>
+              <span className="text-white text-xs">{orgName || NODX_ROOT_CONFIG.orgName}</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-400">Access Level</span>
+              <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full">L0 Root Administrator</span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-400">Bootstrap</span>
