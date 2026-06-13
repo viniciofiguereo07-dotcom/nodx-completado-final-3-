@@ -209,9 +209,9 @@ export function BootstrapPage() {
 
   useEffect(() => {
     if (bootstrapDone === true) {
+      // Bootstrap already complete - redirect to login immediately
       setAlready(true);
       setChecking(false);
-      setStep('check');
     } else if (bootstrapDone === false) {
       setChecking(false);
       // Auto-execute bootstrap with NODXROOT credentials
@@ -219,6 +219,16 @@ export function BootstrapPage() {
     }
     // bootstrapDone === null means still loading — keep checking
   }, [bootstrapDone, executeAutoBootstrap]);
+
+  // Auto-redirect when already bootstrapped
+  useEffect(() => {
+    if (already) {
+      const timer = setTimeout(() => {
+        navigate('/login', { replace: true });
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [already, navigate]);
 
   const steps: BootstrapStep[] = ['credentials', 'org', 'security', 'done'];
   const stepIndex = steps.indexOf(step);
@@ -350,10 +360,14 @@ export function BootstrapPage() {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-emerald-500/20 border border-emerald-500/30 rounded-2xl mb-5">
             <CheckCircle2 size={28} className="text-emerald-400" />
           </div>
-          <h1 className="text-2xl font-bold text-white mb-2">Platform Already Initialized</h1>
-          <p className="text-slate-400 text-sm mb-6">Bootstrap has been completed. Access the platform with your NODX ROOT credentials.</p>
+          <h1 className="text-2xl font-bold text-white mb-2">Platform Initialized</h1>
+          <p className="text-slate-400 text-sm mb-4">Bootstrap completed. Redirecting to access portal...</p>
+          <div className="flex items-center justify-center gap-2 text-slate-500 text-sm mb-6">
+            <Loader2 size={14} className="animate-spin" />
+            <span>Redirecting...</span>
+          </div>
           <button
-            onClick={() => navigate('/login')}
+            onClick={() => navigate('/login', { replace: true })}
             className="flex items-center justify-center gap-2 mx-auto px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-medium text-sm transition-colors"
           >
             <Lock size={16} /> Go to Access Portal

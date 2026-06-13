@@ -67,6 +67,8 @@ import { ExternalIntegrationCenter } from './pages/territorial/ExternalIntegrati
 import { NODXEcosystemConsole } from './pages/ecosystem/NODXEcosystemConsole';
 import { NODXLandingPage } from './pages/landing/NODXLandingPage';
 import { OrganizationsPage } from './pages/organizations/OrganizationsPage';
+import { SystemStatusPage } from './pages/system/SystemStatusPage';
+import { SystemRecoveryPage } from './pages/system/SystemRecoveryPage';
 
 function AuthGuard() {
   const { user, loading, mustChangePassword } = useAuth();
@@ -110,6 +112,11 @@ export const router = createBrowserRouter([
     path: '/bootstrap',
     element: <BootstrapPage />,
   },
+  // System recovery — always accessible for emergency fixes
+  {
+    path: '/system-recovery',
+    element: <SystemRecoveryPage />,
+  },
   // Change password — requires authenticated user
   {
     path: '/change-password',
@@ -129,6 +136,7 @@ export const router = createBrowserRouter([
     element: <AuthGuard />,
     children: [
       { path: '/dashboard',   element: <DashboardPage /> },
+      { path: '/system-status', element: <SystemStatusPage /> },
       { path: '/organizations', element: <OrganizationsPage /> },
       { path: '/ecosystem',  element: <NODXEcosystemConsole /> },
       { path: '/territories', element: <TerritoryDesignerPage /> },

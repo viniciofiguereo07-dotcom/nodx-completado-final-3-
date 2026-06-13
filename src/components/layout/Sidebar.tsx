@@ -22,6 +22,7 @@ const DOMAINS = [
     label: 'CORE',
     items: [
       { key: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard', alwaysShow: true },
+      { key: 'system_status', icon: Monitor, label: 'System Status', path: '/system-status', alwaysShow: true },
       { key: 'organizations', icon: Building2, label: 'Organizaciones', path: '/organizations', alwaysShow: true },
       { key: 'sync', icon: HardDrive, label: 'Dispositivos', path: '/sync', alwaysShow: true },
       { key: 'licensing', icon: Key, label: 'Licencias', path: '/licensing', alwaysShow: true },
